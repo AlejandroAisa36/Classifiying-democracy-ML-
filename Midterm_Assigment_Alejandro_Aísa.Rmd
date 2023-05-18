@@ -1,0 +1,437 @@
+---
+title: "Classifying european democracy in the last century"
+author: "Alejandro Aísa"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Libraries
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library(vdemdata)
+library(tidyverse)
+library(GGally) 
+library(factoextra) 
+library(countrycode)
+library(rworldmap)
+library(mice)
+library(plotly)
+library(DataExplorer)
+library(Hmisc)
+library(corrplot)
+library(factoextra)
+```
+
+## The analysis: main question and approach.
+
+In the last few years, it has been argued in academic circles that democracy is deteriorating. As a consequence of globalization, populism and mass media exposure, some Western countries are supposedly witnessing the worsening of their liberal democratic features. However, this deterioration is far from being explained and/or quantified. Thus, as a first step, we may evaluate and measure which is current status of the democratic regimes in order to obtain meaningful conclusions. On the other hand, it is also desirable to establish a reference to which we can compare the current status. In colloquial terms, we could have indeed suffer a backlash in the last 10-15 years, but if we compare this moment to 1970, we may still consider that the current status is far from being non-democratic.
+
+Hence, the main objective of this work would be to fulfil the second aspect: we will evaluate the democratic features of various European countries in the last 100 years. By virtue of this approach, we could easily estimate the mentioned reference. Finally, we would assess in empirical terms which is the actual condition of each country at different points in time. We would be giving a *meaning* to the democratic status, in relation to their own history. 
+
+## Input
+
+### Downloading the dataset
+
+In order to perform this study, we have selected a dataset created and maintained by the Department of Political Science of the University of Gothenburg: *Varieties of Democracy* (V-Dem). This dataset, which can be downloaded directly as an R-Package, contains more than 4000 variables related to Democracy for all the countries in the World since 1789. These dimensions are grouped according to specific characteristics of democracy, such as elections, executive features or civil society liberties and equalities, etc.
+
+```{r}
+df <- vdemdata::vdem
+```
+
+### Selection of features
+
+From all the list of features included in the dataset, we are going to select 23 variables, according to various reasons. Firstly, we are going to select those variables that would help us to index each observation, such as the name of the country, the standard code of such country and the year. These identification variables would be needed when clustering variables and describing and analysing the data. Similarly, as mentioned earlier, the variables are divided into subsections, depending on the political and sociological aspect they refer to. Therefore, we are going to select either representatives or the most important variable(s) for each subgroup. The main purpose of this distinction is to have a global picture of all the political features of a regime, such as the liberal democratic index, the liberty level of opposition parties, possibilities of popular initiatives, the division of powers, media censorships...
+
+```{r}
+data <- df %>% select(year, country_name, country_text_id, v2x_libdem, v2x_polyarchy, v2xel_frefair, v2elsuffrage, v2psoppaut, v2ddthreci, v2ddthrerf, v2exbribe, v2lgoppart, v2dlengage, v2juhcind, v2juncind,  v2svstterr, v2csgender, v2mecenefm, v2peedueq, v2clgencl, v2clpolcl, v2caassemb, v2cafres)
+```
+
+## Pre-processing and descriptive
+
+### Country-year selection
+
+The first task that we should do with the data is to select those observations that we will need in the analysis. For that, we will focus on European countries from 1900 onwards. The main goal of this historical approach is contemplate only contemporary years that include several events. These circumstances would help to categorize the status of democracy: the first wave of fascism, WWII or the Cold war. In other words, we would be able to compare across historic moments that put the liberal democracies at stake. Similarly, some countries are going to be forfeited due to size constraints (Monaco or Andorra), or simply because they have not existed as an independent state until very recently. No historical trend would exist to be analysed.
+
+```{r}
+countries <- c("Spain", "France", "United Kingdom", "Germany", "Italy", "Portugal", "Albania", "Austria", "Belgium", "Cyprus", "Czech Republic", "Denmark",  "Finland", "Greece", "Hungary", "Iceland", "Norway", "Sweden", "Ireland", "Luxembourg", "Romania", "Russia", "Serbia", "Turkey", "Poland", "Netherlands", "Switzerland")
+
+data_historical <- data %>% filter(country_name %in% countries & year > 1900) 
+
+```
+
+### Renaming
+
+In the original dataset, all variables are named after some specific code to them distinguishable within the whole group. However, as we have selected a small sample, we may rename the chosen ones, to make them more understandable in our analysis.
+
+```{r}
+data_renamed = data_historical %>% 
+rename(
+  code_country = country_text_id, 
+  liberal_dem = v2x_libdem, 
+  electoral_dem = v2x_polyarchy, 
+  clean_elections = v2xel_frefair, 
+  pcg_suffrage = v2elsuffrage,  
+  opp_parties = v2psoppaut, 
+  pop_initiative = v2ddthreci, 
+  pop_referendum = v2ddthrerf, 
+  exc_bribery = v2exbribe, 
+  opp_oversight = v2lgoppart,  
+  pop_deliberations = v2dlengage, 
+  jud_independence = v2juhcind, 
+  jud_low_independence = v2juncind, 
+  territory_controled = v2svstterr, 
+  women_prevented = v2csgender, 
+  media_censorship = v2mecenefm,
+  educational_opp = v2peedueq, 
+  women_equality = v2clgencl,  
+  polgroup_equality = v2clpolcl, 
+  assembly_respect = v2caassemb, 
+  academic_freedom = v2cafres) 
+```
+
+### Treating NAs and aggregations
+
+As the variables and observations have been carefully selected, we expect few cases of missing values. Thus, using the *mice* function we would replace some NA. As the data is timely distributed, it is desirable to have some missing values inferred from the closest years. Then, we would not be losing information nor deriving incorrectly. In this same step, we are going to create some new variables. In the original selection, we had two different variables measuring the independence of *high* judiciary and *low* judiciary. Then, we are going to create a third variable accounting for the average. Similarly, we are creating a dimension, featuring academic and educational variables, to measure the "possibility" of emergence of alternative thoughts to the regime. Finally a variable accounting for popular power is going to be created.
+
+```{r message=FALSE, warning=FALSE}
+m = 4 
+mice_mod <- mice(data_renamed, m=m , method='rf') 
+data_renamed = complete(mice_mod, action=m)
+```
+
+```{r message=FALSE, warning=FALSE}
+data_renamed = data_renamed %>% mutate(
+        judiciary_independence = (jud_independence + jud_low_independence)/2, 
+        educational_status = (educational_opp + academic_freedom)/2, 
+        popular_power = (pop_deliberations + pop_initiative + pop_referendum + assembly_respect) /4) 
+
+```
+
+The last feature engineering process consists in the creation of two categorical variables that indexes the country and the year in more comprehensive dimensions. On the one hand, we would group the observations according to their decade. Similarly, a country-year feature is going to be created. These variables will be very helpful when classifying according to PCAs and clustering. Finally, it is mandatory to create an alternative dataset that account only for the numeric variables. Otherwise, the machine learning algorithms would not work.
+
+```{r}
+data_final = data_renamed %>% mutate (
+  decade = as_factor (case_when(
+    (year <= 1920) ~ "pre20s'", 
+    (year > 1920 & year <=1940) ~ "20s&30s", 
+    (year > 1940 & year <=1960) ~ "40s&50s", 
+    (year > 1960 & year <=1980) ~ "60s&70s", 
+    (year > 1980 & year <=2000) ~ "80s&90s", 
+    (year > 2000) ~ "XXI")),  
+  country_year = paste0(country_name, year))
+
+data_num = data_final %>% select(-country_name, -code_country, -decade, -year, -country_year, -liberal_dem, -electoral_dem) 
+
+```
+
+### Descriptive analysis of the dataset
+
+#### Range of values
+
+According to the own codebook of the dataset, most of the variables are already scaled in a model between -5 to 5. However, due to the specificities of the countries, not all the variables have such a range. As an example, the range of values given in opposition parties goes from ~ -3 to ~3. Academic freedom ranges from -3.67 to 3.37. Nonetheless, all the dimensions that are coded in this range possess the same logic: the lowest the value, the worse a country did in that aspect. Following this premise, a value of -3 in *opp.parties* means that within a given country, at an specific point in time, opposition parties would face many difficulties to criticise and defy the ruling party. Other variables, such as *liberal.democracy* are indexed in a scale 0-1 (same logic as before). Lastly, popular suffrage is measure in percentage terms; 50% means that only males are allowed to vote in elections.
+
+```{r}
+range(data_final$opp_parties)
+range(data_final$academic_freedom)
+
+summary(data_final)
+
+```
+
+#### Correlations
+
+```{r}
+corr_matrix = cor(data_num)
+
+corrplot(corr_matrix, type = "upper", order = "hclust", 
+         tl.col = "black", tl.srt = 45)
+
+
+```
+
+The correlation matrix displayed above show that many variables are correlated between them, as their values are close to 1. While we can not speak about direct causality, we may assume that the increment of some variables are directly related to the increase of others. From a political point of view, it makes sense that the different democratic features are linked between them. As an example, the correlation between opposition parties freedom is highly correlated (0.89) to the presence of clean elections; the more parties are allowed to run for elections, the cleaner these turnouts should be. Nonetheless, positive high correlations are not always the case: The possibility of popular initiatives is not linked with women equality, meaning that in this set of countries, across years, we could not witness a linear relationship between civil liberties for women and the menace of popular initiatives.
+
+#### Means by decade
+
+```{r message=FALSE, warning=FALSE}
+means_decade = data_final %>% 
+  group_by(country_name, decade) %>% 
+  summarise(
+    women_ineq_mean = mean(women_equality), 
+    assembly_mean = mean(assembly_respect), 
+    media_mean = mean(media_censorship), 
+    academic_mean = mean(academic_freedom) 
+  )
+
+means_decade
+```
+
+Thanks to the dimension added regarding the decade each observation belong to, we can estimate the average value of some variables, as a hint of their evolution in time. In this particular case we have selected four features that relate to civil society and their liberties. If we look at two countries that presumably will have high scores in democracy, Denmark and and Finland, we may observe that gender inequality has improved a lot since the 1920's. Ranging from 0.46 and 1.32 to more than 3 in Denmark, 2.5 in Finland. In this second country, media censorship has decrease considerably. (-0.9 to 3). Other noticeable case is found in Hungary. In the central decades of the XXth century, gender equality stood at 2.85, performing better than other western European countries. However, from this point onwards, the index has deteriorated to 2.41. This worsening is a clear example of the problem we want to analyse: some democratic features may be deteriorating, hence liberal democracies.
+
+### Data visualization
+
+```{r message=FALSE, warning=FALSE}
+
+six_countries = data_final %>% filter(country_name %in% c("Spain", "United Kingdom", "France", "Germany", "Italy", "Russia"))
+
+p = ggplot(six_countries)+
+  aes(x = year, y = liberal_dem, colour = country_name)+
+  geom_point() + 
+  geom_path() + 
+  facet_wrap( ~ country_name)+
+  guides(colour = F)
+
+p
+
+```
+
+This first graph shows the evolution in time of the variable "liberal democracy" for six of the biggest European countries, selected also as representative of major historical regimes:
+
+- Spain suffering two major decreases in the period 1923-30 and 1940-1975, but a big jump afterwards. 
+- In the 60's France suffered a big decrease, which could be related to May 68'. 
+- German and Italian fascism can also be observed during the period 1920-1945. 
+- Russia (and the Soviet Union) does not perform well in liberal democracy indexes. This is probably caused by the political regime. 
+- The United Kingdom acts as a representative of liberal democracies, without major decreases and slow improvement over time. 
+
+As a general conclusion, we observe how liberal democracies index oscillate around 0.75 in the last 40 years. Nevertheless, since the last crisis of 2008, we can observe how there is a small decreasing trend. 
+
+```{r}
+data_nowadays = six_countries %>% dplyr::filter(year > 1975)
+
+p2 = ggplot(data_nowadays)+
+  aes(x = year, y = liberal_dem, colour = country_name)+
+  geom_point() + 
+  geom_path()
+
+p2
+```
+
+The plot above shows the same variables, but considering only the last ~50 years. As the previous graph already showed, liberal democracy index reached its peak at the beginning of the XXI century. However, since then we can already notice a small but steady decrease. 
+
+Similarly, we could analyse two democratic features to verify linear relationships. We may take a look to the relationship between executive bribery and judiciary independence in the last years. The graph shows that the may be a linear relationship between the independent decision-making capabilities of the judicial power and the "ability" of the executive power to buy off people. As it may be expected, the less corrupt a government, the freer the judges.
+
+```{r}
+p3 = ggplot(six_countries) + 
+  aes(x = exc_bribery, y = judiciary_independence, colour = country_name)+
+  geom_point()+
+  scale_x_continuous(limits = c(-4, 4))+
+  scale_y_continuous(limits = c(-4,4))
+p3
+```
+
+
+## Principal Component Analysis (PCA)
+
+As we established at the beginning, the main purpose of this work is to evaluate the democratic features of European countries, with the aim to create a threshold to which we can contrast the nowadays' status of the political components of the countries. In other words, we want to classify countries, at different points in time, according to different democratic dimensions, so we can compare each other.
+
+In this aspect, the first tool that we may use is the machine learning methodology known as Principal component analysis. Due to the high dimensionality of the dataset (we got up to 21 variables), we are not able to visualize all of the them at the same time. In other words, it is impossible to plot any graph that reflects all of them. Similarly, due to the high number of dimension, there are millions of relationships that we would have to represent; all possible pair of variables, all possible triplets of variables... Thus, we have to find a way to represent these linear combinations into a small number of new variables. By trying to find hidden relationships in the variables and providing a weight to each of them, we would be able to reduce the dimensionality of the dataset. Hence, thanks to these new variables we would be able to visualize all the dimensions.
+
+From a mathematical/theoretical point of view, these hidden relationships are found in the correlation matrix obtained with the original dimensions. Within each matrix, using computational tools we are able to extract all the vectors that accounts all the relationships between the variables (eigenvectors). Then, if we combine these vectors with a particular value (eigenvalue) we could extract the amount of information that each possible linear combination of the variables brings!
+
+For the analysis of the principal component, we are going to select all numeric democracy-related variables but *liberal democracy* and *electoral democracy*. We will try to classify all country observation according to different democratic features, not democracy indexes themselves. Otherwise, we may be biasing the result a, nor we would be obtaining any insight. In the end, the objective will be to evaluate which of these features are the most important. Thus, for the moment we would need to only contemplate characteristics themselves. 
+
+### Estimation of first PCA
+
+```{r}
+pca1 = prcomp(data_num, scale = T)
+summary(pca1)
+
+fviz_screeplot(pca1, addlabels = TRUE)
+```
+
+As the matrix and plot above suggests, the first principal component may explain up to 61% of the variability; if we were about to visualize the relationships  between the 21 dimensions, the eigenvector that combines with the eigenvalue for the most differences, accounts for 6/10 of the total. Moreover, by adding a second component, we could reach a grand total of 72% of all the differences, as this second PCA adds another 11% of total variance. 
+
+We could continue adding components, but from a explanatory point of view, it does not makes sense. On the one hand, the main objective of PCA is to reduce dimensionality of the dataset so we handle so much information, in terms of possible plot or visualization. Thus, having 10 new dimensions is having the same problem as before. On the other hand, the Scree Plot shows that from the third PCA, the is no marginal gain in information. Every new PCA would add only a small piece of information. Therefore, we will keep only the first two PCAs. 
+
+```{r}
+pca1$rotation[,1] 
+```
+
+Within the first principal component, we can also analyse the weight that each variable has. As an example, _clean.elections_ adds -0.252. If we were about to construct a the linear relationship of this principal component, the presence of clean elections would contribute -.252 to the slope. Most of the variables oscillate between -0.26 and -0.24. This may be interpreted as if these features have more of less the same importance when deciding if a particular observation is performing well. As as explanatory note, it has to be mentioned that all variables have been standardized in a scale 0-1 in order to make interpretations more feasible. Apart from that, the sign of the value is not as important as it may seem. It depends on the particular computer used to calculate the PCA. Then, we would have to focus on the absolute value for the moment. 
+
+```{r}
+barplot(pca1$rotation[,1], las=2, col="green")
+
+fviz_contrib(pca1, choice = "var", axes = 1)
+```
+
+With the plots above, we can obtain the same conclusion in visual terms. As we can see, most of the bars reach the -0.25 point. The ones that seem to not be of the same importance are _popular initiative_ and _referendum_ and _territory controlled_. More specifically, the second plot shows how much information adds to the PC1 each variable, in relative terms. Summing up, if were about to classify all the country-year observations, according to the first principal component, we would say that most of the variable are equally relevant to choose which countries are performing the better. Nonetheless, the same algorithm allow us to see which are in fact the countries that would be situated in the best places of the performance ranking. 
+
+```{r}
+names=data_final$country_year
+decade = data_final$decade
+names[order(pca1$x[,1])][1:50] 
+```
+The best 50 observations  (country-year pairs) that perform the better in the first PC, come from only 3 countries. Among them, one decade stands out in particular: Switzerland, Denmark and Sweden in the 90s! This could hint that the main hypothesis, explained at the beginning may be true. The best performances of democracies are not found nowadays.  
+
+```{r}
+names[order(pca1$x[,1], decreasing=T)][1:50]
+```
+Among the worst performers, there is a plurality of countries. Spain, Russia or Czech Republic are among them. Most of the observations belong to the 40s and 50s, showing a clear pattern. From a historical point of view it may be associated with Soviet and francoist regimes. 
+
+### Second component analysis estimation 
+
+```{r}
+pca1$rotation[,2] 
+barplot(pca1$rotation[,2], las=2, col="red")
+fviz_contrib(pca1, choice = "var", axes = 2)
+
+```
+
+To make the analysis more complete, we may redo the analysis for the second component analysis. As the mathematics principles are the same, we may observe that there substantial differences in the weights of each original dimension. In this case, the percentage of population with right to vote and women equality have huge contribution to the slope, around -0.5 for the two components (women equality is represented in two variables). The second plot shows how they contribute almost to half of the total weight of the second component, way more than the average (red dashed line). In social sciences terms, it is clear that gender parity is highly important when drawing the best component. 
+
+```{r}
+names[order(pca1$x[,2])][1:50]
+names[order(pca1$x[,2], decreasing=T)][1:50]
+
+```
+In this case, some countries that make both "top-50" are repeated from PC1. However, in this case, the countries that perform the better in the second component are Russia and the Czech Republic, this time during the 70's and 80's. Again the effect of the soviet regime could be behind this observation. On the other hand, the countries that are worse off in this second component analysis are Switzerland and Albania, at the beginning of the XX Century. Women equality seemed to remain as an important cleavage at this time.
+
+### Plotting both components 
+
+```{r}
+data.frame(z1=pca1$x[,1],z2=pca1$x[,2]) %>% 
+  ggplot(aes(z1,z2,label=names,color=decade)) + 
+  geom_point(size=0) +
+  labs(title="First two PCAs", x="First pral. comp. ", y="Second pral. comp. ") + 
+  theme_bw() +
+  theme(legend.position="top") + geom_text(size=3, hjust=0.6, vjust=0,     check_overlap = TRUE) 
+# The two first PCs seem independent
+```
+
+If we plot both components into a two dimension graph, we can visualize the status of all country-year observations, according to their performances. In the X axis we have the first principal component. The closest to -5 the better the performance. (Take into account here that the sign depends on the particular computer). On the other hand, the Y axis represents the second principal component. The bigger the value, the worst the particular observation was functioning. 
+
+Interestingly, most of the countries during the first two decades of the XX century are situated in the right top corner of the plot. This could mean that overall, it was the worst period in terms of democratic features. In the opposite spectrum, many of the observations situated in the left bottom of the plot correspond to countries during the 80s and the 90s. Again, this could be a signal that in the last few years, countries are not performing as good. Most observations from 1930 to 1960 are situated in the right part of the plot, which could be translated as if some democratic features regarding referendums or opposition liberties were not attained at the moment, but there were some source of equality among genders. 
+Similarly, those countries that in the recent years are situated close to zero in the X axis and situated in negative values of Y, could mean that while they are not retroceding in civil rights features, they may worsening in the ones related to the PC1, such as referendums or opposition parties. 
+
+## Clustering 
+
+The next methodology that we can follow to describe the data at hand is clustering. This time, instead of reducing dimensionality, we will allow for the mathematical algorithms to classify observations according to similarities. What we would like to achieve at this point, is to obtain 4 or 5 groups of countries, in which differences within observations in a groups should be small, and differences between groups should be big. 
+
+### Partition methods of clustering: k-means. 
+
+The first method that we will use to obtain this goal is partition, via k-means. In this case, the mentioned similarities will be obtained as a result of the sum of distances between each observation. The distance would be understood as the differences in dimension-values between two different observations. From a theoretical point of view, the algorithm is going to select 5 random points. Then, it is going to calculate the distance between these references points, and the rest. With that information, each point will be assigned to the reference point with the lowest distance. As the result of this process is always dependant on the random reference points selected at the beginning, the procedure is going to be repeated a thousand times. Finally, the iteration that minimize the sum of distances within the final groups is going to be selected. 
+
+```{r}
+
+k = 5 
+
+cluster_countries = kmeans(scale(data_num), centers = k, nstart = 1000) 
+cluster_countries 
+
+centers=cluster_countries$centers
+groups = cluster_countries$cluster
+
+barplot(table(groups), col = "yellow") # size of each group 
+
+```
+
+The first interesting insights that is obtained from this clustering method is the size of the groups. On the one hand there are two groups composed of ~1250 and ~800 observations. We can also notice other two medium groups of around 450 country-year observations and a small group of 120 countries. The second aspect to mention is the standard deviations that each group differs from the global average. As an example, the most centred observation from the biggest group deviates ~0.81 standard deviations from the global average in _clean elections_, ~0.86 in _media censorship_ or 0.83 in _women equality_. As we can repeat this numerical analysis with 21 dimensions for the 5 groups, we may visualize these results. Then, we can observe properly the features of each group. 
+
+```{r}
+barplot(centers[1,], las=2, col="pink")
+barplot(centers[2,], las=2, col="red")
+barplot(centers[3,], las=2, col="green") 
+barplot(centers[4,], las=2, col="black")
+barplot(centers[5,], las=2, col="navy")
+```
+
+The first group (in terms of size), is grouped around and observation that deviates around 0.8 in most of the dimensions but popular initiatives and referendums. In this first group we could find most of the observations. Thus, we can not highlight any specific characteristic. On the contrary, group 2 are gathered around a particular observation that deviates a lot in variables refereed to opposition parties and civil inequalities. Therefore, in this case we may find countries with low level of opposition but some development in civil rights; maybe the soviet countries?. The next two groups have similar characteristic as the first one. This time, however, the general deviation is negative. Finally, the fifth group, the smallest one, stands out for the huge deviation in terms of popular initiative and popular referendum. Thus, this group could be composed by countries that give so much importance to public deliberations and public opinion. 
+
+```{r}
+fviz_cluster(cluster_countries, data = data_num, geom = c("point"),ellipse.type = 'norm', pointsize=1)+
+  theme_minimal()+
+  geom_text(label=names,hjust=0, vjust=0,size=2,check_overlap = T)+scale_fill_brewer(palette="Paired")
+```
+
+The plot above combines the methodolgy of k-means clustering and principal component analysis. In visual terms, we can observe which is the situation of the countries in terms of democratic performance: 
+As we can see in the left top corner we can see the small group that stood out for their importance of popular initiative: Switzerland; our impressions from before are correct! Historically and politically speaking, this country has differentiate itself due to the numerous plebiscites between and within its regions (Cantons). At the bottom right corner we have eastern European countries in from the soviet era. Once again, our intuition was right. According to the figures and the plot, this could be the group that highlighted due to their deviation in terms of none opposition parties but some source of civil equalities. 
+
+Finally, we can observe two big groups, that account for many countries with no general characteristics. There is huge variety in terms of countries (eastern central and southern Europe) and decades. Interestingly, the last group, the one situated in the bottom left corner is a relatively big group in terms of size but accounts for small physical distance between the points. This could mean that the groups is composed by many countries with homogeneous characteristics. We can observe in this group many western countries from the 80s onwards. However, two key points may be highlighted: 
+
+- Some countries like Hungary of Poland used to be classified in this group. Nowadays, they do not belong to this group any more.  
+
+- Within this group, the better performers belong to the 80s and 90s. 
+
+### Hierarchical 
+
+The last classification method, involves Clustering via hierarchic methods. While having the same objective, the mathematical theory behind this process is different. This time we would start with all the sample of observations, computing them as individual clusters, and join them one by one; We select each country-year and we associate it with  the observation closest to it. This pair would form a new cluster. Then, we repeat this step with each cluster as many times as we need. Therefore, we would obtain a tree-alike distribution of clusters. At the begging, we have all the observations individually clustered, then, at each step we would have a bigger new cluster. Hence a _hierachy_ of clusters. The distance between points would be the one that minimized square variance within the clusters.
+
+This time however, we will focus only in the observations from 1975 until our days. Previous sections has already classified countries according to regimes and decades, having the 80's and 90's and the XXIth century the best performances overall. Therefore, this time we would try to be more precise when comparing differences between countries. For that, we will only select the last 30 years. 
+
+```{r}
+data_final2 = data_final %>% 
+  filter(year > 1992)
+
+data_num2 =  data_final2 %>%  select(-country_name, -code_country, -decade, -year, -country_year, -liberal_dem, -electoral_dem) 
+
+names2 = data_final2$country_year
+```
+
+```{r}
+euc = dist(scale(data_num2), method = "euclidean")
+mah = hclust(euc, method = "ward.D2")
+mah$labels <- names2
+```
+
+```{r}
+
+fviz_dend(x = mah,
+          k = 8,
+          color_labels_by_k = TRUE,
+          cex = 0.8,
+          type = "phylogenic", 
+          repel = F
+          ) +  
+  labs(title="Democratic features 1975-2021") + theme(axis.text.x=element_blank(),axis.text.y=element_blank())
+```
+
+Due to size constraints, we are limiting the hierarchical clustering to a dendogram. (Plot above). Partly because of the own features of the method, most of the countries are associated between them, at different points in time. Still, we can draw some conclusions. On the one hand, northern European countries are grouped together. Countries like Sweden, Denmark or Germany belong to the same hierarchical cluster (all years included). Next group comprises the bulk of the European Union countries, such as France, Belgium or Spain. Other regions such as the Balkans and Eastern Europe have their own hierarchical cluster. As a result of this clustering, we may assess that the geographical position is more significant than the year to determine the level of democracy. As countries have been sorted according to their localization and not the time, we could judge that nowadays countries possess very similar characteristic as they had 30 and 20 years ago. 
+
+## Final diagnosis
+
+Throughout this report, we have the objective to sort Western European countries in the last century, according to different political features. The different classification methods have yield interesting aspects to mention:  According to the principal component analysis conducted , we know that the most of the features selected are equally important to discern which countries are the best performers. In this line of reasoning, if we want to add a second component analysis, we would need to focus on gender inequality measures such as popular suffrage and women rights. Moreover, considering these results, Nordic Countries during the 90s and Switzerland were highlighted as the best performers. 
+
+Similarly, the clustering analysis carried out demonstrated that the regimes type and the decade played an important part in sorting all the observations. Thereof, K-means algorithms determined that the cluster with best performers was fulfilled by countries during the 80s and 90s and many contemporaries. Nonetheless, among the contemporary countries, we could visualize some of them in worse positions (in plot terms) than
+previous years. Hierarchical clustering showed similar patterns: countries behave very similar nowadays and during the 90s. 
+
+In light of these reasoning we could extract two main conclusions. On the one hand, it is more or less clear that the _peak_ of performance was achieved around 30 years ago. When weighting all the features and visualizing them these decades are always at the top. Therefore, we may establish them as the main threshold/ideal to compare. On the other hand, it is not clear that there is a huge deterioration of features. Should it be happening, it is modest and limited to some countries. 
+
+### Notes 
+
+-I tried to run the assignment as if it were an actual report, in order to provide more meaning to the actual analysis. 
+
+-For the hierarchical clustering, I tried to perform the analysis with the all the set of countries, but the program failed. Hence why I limited it to the last 30 years. 
+
+## Bibliography 
+
+- @Misc{,
+  title = {{V-Dem Country-Year/Country-Date Dataset v11}},
+  author = {Michael Coppedge and John Gerring and Carl Henrik Knutsen and Staffan I. Lindberg and Jan Teorell and Nazifa Alizada and David Altman and Michael Bernhard and Agnes Cornell and M. Steven Fish and Lisa Gastaldi and Haakon Gjerl\o{}w and Adam Glynn and Allen Hicken and Garry Hindle and Nina Ilchenko and Joshua Krusell and Anna L\:uhrmann and Seraphine F. Maerz and Kyle L. Marquardt and Kelly McMann and Valeriya Mechkova and Juraj Medzihorsky and Pamela Paxton and Daniel Pemstein and Joseﬁne Pernes and Johannes {von Römer} and Brigitte Seim and Rachel Sigman and Svend-Erik Skaaning and Jeffrey Staton and Aksel Sundström and Ei-tan Tzelgov and Yi-ting Wang and Tore Wig and Steven Wilson and Daniel Ziblatt.},
+  institution = {Varieties of Democracy (V-Dem) Project},
+  year = {2021},
+  url = {https://www.v-dem.net/en/data/data-version-11/},
+}
+
+- @Misc{,
+  title = {{V-Dem Codebook v11}},
+  author = {Michael Coppedge and John Gerring and Carl Henrik Knutsen and Staffan I. Lindberg and Jan Teorell and David Altman and Michael Bernhard and Agnes Cornell and M. Steven Fish and Lisa Gastaldi and Haakon Gjerløw and Adam Glynn and Allen Hicken and Anna Lührmann and Seraphine F. Maerz and Kyle L. Marquardt and Kelly McMann and Valeriya Mechkova and Pamela Paxton and Daniel Pemstein and Johannes {von Römer} and Brigitte Seim and Rachel Sigman and Svend-Erik Skaaning and Jeffrey Staton and Aksel Sundtröm and Eitan Tzelgov and Luca Uberti and Yi-ting Wang and Tore Wig and Daniel Ziblatt},
+  institution = {Varieties of Democracy (V-Dem) Project},
+  year = {2021},
+  url = {https://www.v-dem.net/en/data/data-version-11/},
+}
+
+- @Misc {nogales20202
+title = {Advance Modelling | Computer Lab 2: extracting socio-economic information in the world using PCA}, 
+author = {Nogales, F. Javier}, 
+year = {2023}}
+
+- @Misc {nogales20202
+title = {Advance Modelling | Computer Lab 3: organizing countries by socioeconomic information using clustering tools}, 
+author = {Nogales, F. Javier}, 
+year = {2023}}
+
+
+
