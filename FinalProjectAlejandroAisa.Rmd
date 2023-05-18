@@ -1,0 +1,820 @@
+---
+title: "Is democracy behind economic openess?"
+author: "Alejandro Aísa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+## Libraries
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library(vdemdata)
+library(tidyverse)
+library(factoextra) 
+library(countrycode)
+library(mice)
+library(DataExplorer)
+library(Hmisc)
+library(corrplot)
+library(caret)
+library(glmnet)
+library(GGally)
+library(pROC)
+library(MASS)
+```
+
+## The problem:  
+
+Ever since the fall of the Soviet Union, liberal democracy has expanded all over the world. Ideas like free elections, media freedom and division of power have taken over most of the political discourses and constitutions. Similarly, the expansion of free trade has reached almost all parts of the globe. Organizations like the WTO or the European Union were born to promote and protect the circulation of goods, capital and people over the world, or at least over substantial parts of it. These two ideas are at the core of the current globalization process. Therefore, politic and academic circles have wondered about the relationship between these two. Is democracy linked to the expansion of free trade? Numerous works and studies have been performed about it. 
+
+Building on this assumption, this work will try to explain and predict if democratic features are behind the relative size of trade within a country. More specifically, we will seek to forecast either if a country is a _low trader_ one and  the bulk of trade relative to its GDP (trade as a percentage of GDP).
+
+## Feature Selection 
+
+### V-dem 
+
+Similarly to previous reports, we are going to resort to the database created and maintained by the Department of Political Science of the University of Gothenburg: Varieties of Democracy (V-Dem). As customary, we will download the variables as an R package from CRAN. After that, we will select only a representative sample of these variables. For future filtering and covariate controlling, we are also going to include some geographical and demographic features such as the area of the countries and their population. 
+
+The first filtering step that we may do refers to the time scope we are interested in. As we would like to focus only to the globalization era after the Cold War, we will select only the years within the XXI century; the first years after the fall of the Soviet Union were very turbulent from a political and economic point of view, then we are going to exclude them. Similarly, the COVID pandemic affected the global trade in, so we will need to skip them. Hence why the period 2000-2019 is the final time scope. 
+
+
+```{r}
+df <- vdemdata::vdem
+
+df_selected <- df %>% dplyr::select(year, country_name, v2x_libdem, country_text_id, v2xel_frefair, v2elsuffrage, v2psoppaut, v2ddthreci, v2ddthrerf, v2exbribe, v2lgoppart, v2dlengage, v2juhcind, v2juncind,  v2svstterr, v2csgender, v2mecenefm, v2peedueq, v2clgencl, v2clpolcl, v2caassemb, v2cafres, e_regionpol, e_wb_pop, e_area)
+
+df_time  <- df_selected %>% filter(year > 1999 & year < 2020) 
+
+```
+
+Next step for cleaning data involves the creation of an index variable accounting for the Country Code and the year, for identification purposes. In a similar line of reasoning, we are going to rename all of the variables to make them more comprehensive. 
+
+```{r}
+df_renamed <- df_time %>% 
+  mutate(
+  country_year = paste0(country_text_id, year)) %>%
+transmute(
+  year, 
+  country_name, 
+  CountryCode = country_text_id, 
+  country_year, 
+  lib_dem = v2x_libdem, 
+  clean_elections = v2xel_frefair, 
+  pcg_suffrage = v2elsuffrage,  
+  opp_parties = v2psoppaut, 
+  pop_initiative = v2ddthreci, 
+  pop_referendum = v2ddthrerf, 
+  exc_bribery = v2exbribe, 
+  opp_oversight = v2lgoppart,  
+  pop_deliberations = v2dlengage, 
+  jud_independence = v2juhcind, 
+  jud_low_independence = v2juncind, 
+  territory_controled = v2svstterr, 
+  women_prevented = v2csgender, 
+  media_censorship = v2mecenefm,
+  educational_opp = v2peedueq, 
+  women_equality = v2clgencl,  
+  polgroup_equality = v2clpolcl, 
+  assembly_respect = v2caassemb, 
+  academic_freedom = v2cafres, 
+  region = e_regionpol, 
+  population = e_wb_pop, 
+  area = e_area) 
+
+```
+
+### World Bank 
+
+For obtaining the trade percentage of each country we will resort to the data offered by the World Bank. We can download it as a CSV: 
+
+```{r}
+wb <- read_csv("API_NE.TRD.GNFS.ZS_DS2_en_csv_v2_4901725.csv", 
+         skip = 3, show_col_types = F) %>% dplyr::select(-"...67") 
+
+world_bank <- wb %>% 
+  pivot_longer(
+    starts_with("1") | starts_with("2"),
+    names_to="Year",
+    values_to ="trade_pcg"
+  ) %>% 
+  rename("CountryCode" = "Country Code") %>% 
+  filter (Year > 1999 & Year < 2020) %>% 
+  transmute(
+    country_year = paste0(CountryCode, Year), 
+    trade_pcg
+  )
+
+```
+Next, we need to perform the same data cleaning process with the GDP for each country. However, GDP is going to be considered under a logarithmic scale, to help the interpretability of the future models. 
+
+```{r}
+wb2 <- read_csv("API_NY.GDP.MKTP.CD_DS2_en_csv_v2_5336567.csv", 
+               skip = 3) %>% dplyr::select(-"...67") 
+
+world_bank2 <- wb2 %>% 
+  pivot_longer(
+    starts_with("1") | starts_with("2"),
+    names_to="Year",
+    values_to ="GDP"
+  ) %>% 
+  rename("CountryCode" = "Country Code") %>% 
+  filter (Year > 1999 & Year < 2020) %>% 
+  transmute(
+    country_year = paste0(CountryCode, Year), 
+    GDP = log(GDP)
+  )
+
+```
+
+### Joining datasets 
+
+After downloading the dependent variable and the GDP, we can merge them to the original dataset. 
+
+```{r}
+df_join <- df_renamed %>% 
+  left_join(world_bank, by = "country_year") %>% 
+  left_join(world_bank2, by = "country_year")
+```
+
+### Removing small countries & renaming regions 
+
+The last cleaning process involves another filtering and some renaming. On the one hand, we are going to exclude all (very) small countries and the pacific islands. Assuming that their relative reduced size and geographical position would make them dependent on importing goods and services, we will remove them to prevent noise and bias. Similarly, the region variable is going to be recoded into factor and categorized, in order to include such feature into the models. At this point we are going also to remove those missing observations in the dependent variable.
+
+```{r}
+df_final <- df_join %>% 
+  filter(region <= 8 & population > 250000 & area > 500) %>% 
+  mutate (region = as.factor(case_when(
+    region == 1 ~ "EasternEurope", 
+    region == 2 ~ "LATAM", 
+    region == 3 ~ "MENA", 
+    region == 4 ~ "SubSaharianAfrica", 
+    region == 5 ~ "WesternEurope",
+    region == 6 ~ "EasternAsia",
+    region == 7 ~ "SouthEastAsia",
+    region == 8 ~ "SouthAsia"))) %>% 
+    drop_na(trade_pcg)  
+
+  
+```
+
+## Description of data 
+
+### Global Summary 
+
+```{r}
+#df_report <- df_final[5:28]
+#create_report(df_report)
+summary(df_final)
+```
+
+Same as the previous report, most of the democratic variables are scaled between -5 and 5. The bigger the value the better (in democratic terms). There are a handful of variables that seem follow a normal distribution, such as popular deliberation and media censorship or GDP (logged). Others do not possess a particular distribution, with symmetric distributions with most of the observations at both of the extremes. 
+
+### NAs 
+
+The amount of missing observations is very low; around 0.21%. Thus, we may impute the missing observations using the mice algorithm: Treating the missing observation as a dependent variable, it will _predict_ the value using the rest of the covariates and the similar observations as predictors. Using this formula we would not lose much information while adding a small amount of variance. 
+
+```{r}
+m = 4 
+mice_mod <- mice(df_final, m=m , method='rf')
+df_final <- complete(mice_mod, action=m)
+```
+
+#### Correlation Matrix 
+
+```{r}
+data_corr <- df_final[5:28] %>% dplyr::select(-region)
+corr_matrix <- cor(data_corr)
+corrplot(corr_matrix, type = "upper", order = "hclust", 
+         tl.col = "black", tl.srt = 45)
+```
+The plot above shows the linear correlation between the variables. On the one hand we may see that most of the democratic features are highly related between them (the bigger the size of the circles, the biggest the correlation). On the other hand, trade seem to not be linearly related to any of them. Only a small correlation to educational opportunities and negative correlation with area. 
+
+#### Trade and liberal democracy 
+
+```{r}
+p1 = ggplot(df_final)+
+  geom_point(aes(lib_dem, trade_pcg, colour = region))
+p1
+```
+
+Similarly, when plotting the relationship between liberal democracy and percentage of trade we cannot observe any linear pattern. 
+
+### Target variable description
+
+Nonetheless, the most important descriptive part involves the target variable alone. We need to understand it for the future models to be applied.
+
+#### Range
+
+```{r}
+summary(df_final$trade_pcg)
+```
+The first thing that stands out about the behaviour of the feature is the huge range. Taking into consideration its relative nature, the range is quite unusual: the maximum value is almost 450% of the GDP. In other words, the sum of import and exports of the country is four times bigger than the GDP. In the opposite side, there is a country that is completely closed to the interchange of goods: 1.2%. 
+
+#### Distribution 
+
+In order to visualize the distribution of the observations, we can plot and histogram by deciles. 
+
+```{r}
+seq <- seq(0, 450, by = 10)
+
+hist(df_final$trade_pcg, breaks = seq)
+
+```
+
+As we can see in the plot above, the target variable seem to have a _quassi_ normal distribution. While it seem to be negatively skewed, one can observe the substantial number of observations that are present from the 200% to the 400%. 
+
+However, as a first step in the analysis, we are interested in those countries with substantial low levels of trade; < 50%. More specifically, we will try to predict these countries them due to their democratic features. Then, we will try to predict the _exact_ percentage according to these same variables. 
+
+## Feature Engineering 
+
+### 08' crisis 
+
+For the moment, due to computational limitations we are only adding a new feature to the set of covariates. It constitutes a dummy variable accounting for 1 if the observation is pre-2008 crisis, and a zero if after it. This new feature will serve also to control for the dynamic nature of data. By adding this new factor we may observe the variability of the dependent variable due to this change in time. 
+
+```{r}
+df_final <- df_final %>% 
+  mutate(
+    precrisis = as.factor(case_when(
+      year < 2008 ~ 0, 
+      year >= 2008 ~ 1)))
+
+```
+
+## Clasification: Interpretative tools 
+
+Before going into the models themselves, we need to define what a _low trader_ country is. According to the histograms showed above, most of the countries  are above the 50% point of trade relative to the GDP. Thus, we will consider that these countries that the volume of imports and exports do not sum up to half of the country's GDP as _low traders_. Then, first, we will try to explain the belonging to that group based on democratic features. After that, using machine learning tools we will try to predict it. 
+
+Also, one of the main difficulties that we will face is the non-linearity of data between the features and the outcome; as the correlation matrix and plot showed, we can not summarize in an straight line the relationship between them. Thus, when constructing the models we would need to account for that. 
+
+### Categorical Y 
+
+To fulfil the objectives, it is necessary to define the new variable as a categorical one. Those countries with less than 50% of trade would be labelled as '1' and the rest as '0'. As a descriptive note, we can observe that data is quite unbalanced as 22% are '1s' and 78% are '0s'. 
+
+```{r}
+df_categorical <- df_final %>%
+  mutate (
+  low_trader = as_factor(if_else(trade_pcg < 50, 1, 0))) %>% 
+  dplyr::select(-trade_pcg, -year, -country_name, -CountryCode, -lib_dem, -country_year)
+
+prop.table(table(df_categorical$low_trader))
+```
+
+### Splitting dataset
+
+Next (and final) task we should do before constructing the model is to split the dataset. As we want our models to be general, we will train them with a majority portion of the data, and then, we will test it with the rest. 
+
+```{r}
+in_trainC <- createDataPartition(df_categorical$low_trader, p = 0.75, list = FALSE) 
+trainingC <- df_categorical[ in_trainC,]
+testingC <- df_categorical[-in_trainC,]
+
+```
+
+### Logistic Regression
+
+The first model that we will use to explain the relationship between democracy and trade is logistic regression. It is a generalized linear model, in the sense that instead of modelling the (linear) relationships between the dependent and the covariates, we would be modelling the linear relationship between the covariates and the log odds of Y = 1. Thus, we would be solving the non linearity of data with actual linear models; in theoretical terms, the relationship between the odds of Y = 1 and the covariates would indeed form a straight line. 
+
+```{r}
+logistic = glm(low_trader ~., family = "binomial", data = trainingC) 
+summary(logistic)
+```
+
+The figures of the model show interesting results. On the hand, most of the variables seem to be statistically significant for at least the 95% confidence level. This would imply that we could be sure that the coefficients showed in the model are reliable. So at this point, we may assess that we could actually perform an analysis on trade based on democratic variables: 95 out of 100 times we can quantify their effect on trade. However, the significance level only allow us to check whether we can be sure that the estimation for the effect is correct, not the actual effect. 
+
+The first hint that would enable us to see if the model is appropriate to explain the variability in log odds of Y is the differences in deviances: The residual is lower than the null one. Therefore, we can assume that the errors in the predicted odds are lower when adding the covariates than using only the intercept. In other words, we may explain better the log odds of being _low trader_ when using our explanatory variables. So, which is the individual effect of each covariate?. To calculate the actual increment in odds, we should take the exponential of each individual coefficient (we were calculating log odds, so we need to get rid of that 'log') 
+
+```{r}
+exp(coef(logistic))
+```
+While being statistically significant, most of the variables do no have a substantial effect on the odds of Y = 1. Most of the coefficients show values around 1. As an example, an increase of 1 unit in executive bribery leads to and increase of 1.3 in the odds of a country for being a _low trader_. The sign of the coefficient is still mentionable. From a social sciences point of view, it is not fully interpretable: the less prone to corruption a government is, the less likely to engage in international trade. Investors should not as be suspicious of these kind of governments. Among the few variables that do have a substantial effect we we find South Asia region (as factor) and popular referendum. Both case could be considered as a surprise as the South Asia counts with one of the biggest countries in the worlds in terms of GDP: India. The odds of being a _low trader_ country increases (by 6 times) despite belonging to such region. Similarly, the more possibility of a popular referendum, the more likely of Y = 1. 
+
+### Confusion matrix
+
+While it is not the main objective at this stage, we may try to predict already in the testing set the countries that are _low traders_. On the one hand, it would serve as a reference model for the future. Logistic models is the "simplest" one, so whenever we increase the complexity in the models, we may compare their performances.
+
+In this line of reasoning, we would need to set a threshold for which we would consider a country a _low trader_. Putting it simply, if the model predict a particular observation to have 0.25 of probabilities to be 1, we would already set it as _low trader_. By setting this low threshold, we aim to correct the imbalances of the observations described above. 
+
+```{r}
+probabilities_log <- predict(logistic, newdata=testingC, type='response')
+prediction_log <- as.factor(ifelse(probabilities_log > 0.25, "1", "0"))  
+```
+
+```{r}
+confusionMatrix(prediction_log, testingC$low_trader)$table
+confusionMatrix(prediction_log, testingC$low_trader)$overall[1:2]
+
+```
+The main tool that serve to evaluate the predictive power of the model is the confusion matrix. It accounts for the number of observations that it correctly predicted, either '0s' and '1s', and the number of observations that it missed. As we are interested in predicting countries with low levels of trade, we should focus on the '1s'. 
+
+On the one hand, due to the low threshold, we have a significant amount of false positives, as we labelled them as '1s' when in reality they were '0s'. These mistakes are of low importance. On the other hand, we had a handful of costly mistakes, in the sense that we were unable to forecast them as low traders: false negatives. If we were policy makers or investors, we could be losing very important observations. As these are precisely the objective, we would need to minimize this number. Finally, we had an accuracy of 76%, meaning that we predicted correctly 76% of the observations.  
+
+## Clasification: prediction tools. 
+
+In order to improve these predictions we are going to resort to machine learning tools. More specifically, they are supervised tools, as they need to be trained with certain parameters specified by us. Also, with the inputs provided, these algorithms will try to predict and output Y, in our case _low trader_. 
+
+### LDA 
+
+#### The model 
+
+The first predictive tools is Linear Discriminant Analysis. Assuming Bayesian probabilities, it will try to classify each observation into the two different groups. While in theory it is used an interpretative tool rather than predictive, we may run the analysis just to check if the performance is better than the logistic. It usually expects to find more than two groups, so the figures would not be as important.  
+
+```{r}
+lda <- lda(low_trader ~ ., data=trainingC)
+lda
+```
+
+Even if not interested in the coefficients, we can see that the region is again one of the variables with one of the most substantial importance to classify observations. 
+
+#### Confusion matrix 
+
+```{r}
+probability_lda <- predict(lda, newdata=testingC)$posterior
+prediction_lda <- as.factor(ifelse(probability_lda[,2] > 0.25, '1', '0'))
+```
+
+```{r}
+confusionMatrix(prediction_lda, testingC$low_trader)$table
+confusionMatrix(prediction_lda, testingC$low_trader)$overall[1:2]
+```
+After performing the predictions in the testing dataset, we may observe the accuracy and the number of false positives is more or less the same as the logistic regression. It makes sense as the logic behind the model is very similar. Both methods try to model a linear relationship between the covariates and probabilities/odds. Thus, we could expect such similar performances.  
+
+#### ROC Curve 
+
+```{r}
+roc.lda <- roc(testingC$low_trader ~ probability_lda[,2])
+
+plot(roc.lda, col="red",print.thres=TRUE)
+
+```
+
+Still, we can plot the ROC curve. It shows visually the performance metrics of the models. It compares the number of correctly predicted '1s' to the number of correctly corrected negative cases. The line represent the both performances, depending on the threshold chosen. Thus, we would need this line to be closer to the top right corner, meaning that the ratio of correct predictions is high enough. Finally, the straight line is the random classifier (~50% accuracy). Therefore, the bigger the area under the curve the better. For this specific case, the value is between 0.7 and 0.85. In order to improve this, we can resort to purely predictive tools for machine learning. 
+
+### Train control for Machine Learning
+
+To maximize predictions, we are going to include cross validation. This technique would allow us to train the model various times using k-folds; we will divide the training dataset in 7 separate parts, and will train a different model with a combination of 6 part and validate them in the fold not included. This would show the most optimal combination of coefficients to predict. 
+
+```{r}
+ctrl_c <- trainControl(method = "repeatedcv", 
+                     number = 7, 
+                     classProbs = T, 
+                     summaryFunction=twoClassSummary,
+                     verboseIter = T)
+
+```
+
+### Renaming levels 
+
+For the algorithms to properly work, we would need to rename the output variable into "No" and "Yes". 
+
+```{r}
+levels(trainingC$low_trader)=c("No","Yes") 
+levels(testingC$low_trader)=c("No","Yes")
+```
+
+### K-nearest-neighbours (KNN)
+
+The first tools that we will use is the K-nearest neighbours. For each particular observation, it will look to the '10' closest ones for classifying. The more a abundance from a particular group ('no's and 'yes') the neighbours, the more probable to assign such group to the observation analysed. While it is not the most optimal algorithm, due to the geographical nature of the data makes sense to include this kind of tool. Metaphorical neighbours could be actual neighbours in spatial and time terms. 
+
+#### The model 
+
+```{r}
+
+knn_model <- train(low_trader ~ ., 
+                data = trainingC,
+                method = "kknn",   
+                preProc=c('scale','center'),
+                tuneLength = 10,
+                metric="ROC",
+                trControl = ctrl_c)
+plot(knn_model)
+```
+
+The plot show that the ROC overall performance, based on cross validation, do not change depending on the number of neighbours that we include in the model. The area under the curve seem to be around 0.915-0.93, which is in fact a very good performance, using from 5 to 20 close neighbours. We can check this information with the actual predictions.  
+
+#### Predictions 
+
+```{r}
+probabilities_knn = predict(knn_model, testingC, type="prob")
+prediction_knn <- as.factor(ifelse(probabilities_knn[,2] > 0.25, "Yes", "No"))
+
+confusionMatrix(prediction_knn, testingC$low_trader)$table
+confusionMatrix(prediction_knn, testingC$low_trader)$overall[1:2]
+```
+When looking into the predictions, we can see that the performances are indeed so much better than logistic and LDA!. On the one hand there are only 17 false negatives and 23 false positives. This means that would be committing a very low amount of errors; both costly mistakes and cheap mistakes are minimizes. Thus, using KNN and democratic variables we could be indeed predicting whether a country is in fact closed to the interchange of goods and services. On the other hand, accuracy is almost 95%, which imply that out of 100 times we would be predicting correctly 95 cases. 
+
+### Random Forest 
+
+The next model we will use to classify countries is Random Forest. This technique is quite different to KNN. For each observation, we will select a particular variable with an established threshold. If the observation falls below that point it would be classified as '0'; if above that point, '1'. This process, however, is going to be successively repeated with many variables to avoid mistakes (decision tree). Then, this very same model will be repeated up to 10 times, to reduce bias. Apart from the iterations, each time the algorithm is going to select by chance a random number of predictors, in order to minimize the variance. Finally, we will include also cross validation to optimize the performance of the ROC curve. Therefore, as there would be many iterations for the decisions trees, the performance of the model is ultimately maximized. 
+
+#### The model 
+
+```{r}
+rf_model <- train(low_trader ~ ., 
+               data = trainingC,
+               method = "rf",   
+               preProc=c('scale','center'),
+               tuneLength = 10,
+               metric="ROC",
+               trControl = ctrl_c)
+plot(rf_model)
+```
+
+Attending to the plot above, the ROC seem to be maximized with around 5-10 random predictors. Interestingly, the more covariates the less area under the curve. It would seem that we would be introducing bias into the model without improving accuracy. In any case, the performance metric show and interval between 0.9765 and almost 0.98, which in the end is a _fantastic_ result. 
+
+#### Predictions 
+
+```{r}
+probabilities_rf = predict(rf_model, testingC, type="prob")
+prediction_rf <- as.factor(ifelse(probabilities_rf[,2] > 0.25, "Yes", "No"))
+
+confusionMatrix(prediction_rf, testingC$low_trader)$table
+confusionMatrix(prediction_rf, testingC$low_trader)$overall[1:2]
+```
+The confusion matrix shows that the costly mistakes of not guessing _low traders_ correctly are extremely minimized: only 9. However, we would be having a bigger amount of false positives. In the end, having accuracy  a very similar value as KNN, choosing between random forest and knn would a trade off. If were were only interested in not missing any _low trader_, we should focus on random forest, at the expense of including here some other observation. On the other hand, if the objective were to have a more balanced prediction, we should focus on K-nearest neighbours. 
+
+### Variable importance
+
+While the functioning of these algorithms is a black box, in the sense that we cannot know what is happening, we can indeed guess which are the most important variables for each of the algorithms to classify observations. 
+
+```{r}
+knn_imp <- varImp(knn_model, scale = F)
+plot(knn_imp, scales = list(y = list(cex = .95)))
+
+
+rf_imp <- varImp(rf_model, scale = F)
+plot(rf_imp, scales = list(y = list(cex = .95)))
+```
+In both cases, population and area are the most important variables to predict _low traders_. It makes sense that small countries would need to import and export goods. However, with respect to KNN, educational opportunities seem to be as important. After these three variables, the importance of the variables decreases steadily, being territory controlled and the presence of clean elections also important. The presence of these two variables also makes sense, as from investor's point of view, the presence of strong state in all the territory and democratic rule could assure the investment is reliable. 
+
+With respect to random forest, we can see the steady decrease in importance for most the variables as well, being educational opportunities and women equality somehow important. Nonetheless, what is more interesting in this algorithm is the none importance of the region variable to predict _low traders_. For this particular algorithm, the geo-political position of an observation does not help to predict its openness. 
+
+## Advance regression: interpretation tools
+
+The second analysis of this report would be to predict the exact % of trade for each observation considering the democratic features.
+
+### Splitting dataset and train control
+
+For this kind of analysis, we will also need to split the dataset for training and testing, as well as selecting only the numeric and factor variables. This time however the cross validation is going to be simplier, as we don't need to include probabilities, just the number of folds. Due to computational resources, this time we will divide the training dataset in 5 folds and repeat the process only 1 time. 
+
+```{r}
+df_numeric <- df_final[6:29]
+
+in_trainR <- createDataPartition(df_numeric$trade_pcg, p = 0.75, list = FALSE)
+trainingR <- df_numeric[ in_trainR,]
+testingR <- df_numeric[-in_trainR,]
+
+ctrl_R <- trainControl(method = "repeatedcv", 
+                     number = 5, repeats = 1)
+
+linear_cv <- trade_pcg ~. 
+
+```
+
+### Linear Regression 
+
+In order to construct a benchmark model, we will train a linear model. Knowing that at first sight there are no linear relationships between covariates and output, it is always a good idea to have a model which acts a reference one to compare with. 
+
+#### The model 
+
+```{r}
+linear_model <- train(linear_cv, data = trainingR, 
+                 method = "lm", 
+                 preProc=c('scale', 'center'),
+                 trControl = ctrl_R)
+linear_model
+summary(linear_model)
+```
+
+Even using cross validation, linear models seem to be not efficient to predict the trade percentage of the countries. Only half of the variables seem to be statistically significant for explaining trade at the 99% confidence level. This is another sign that linear models do not capture the relationships between the covariates and the output. Among the ones that do serve to explain the variability of Y, we can highlight again the different regions, educational opportunities and executive bribery. An increase in one unit of executive bribery (the bigger in the index, the less bribery), the trade % seem to increase by 14 points, contrary to logistic. With respect to the region, the belonging to South East Asia increases by 22 percentage point the trade, relative to the GDP. With no surprise, the countries in this region belong to the ASEAN, one of the biggest organizations in the world to promote free trade. 
+
+Unluckily, even the model itself being significant (p-value < 0.05), the R-square shows a value of 0.39; quite low. This means that according to this linear model we can only explain 39% of the variability of Y. Thus, we would need other types of models. Also, the mean average error, that is how much the predicted value differs form the original by mean, one stands at 26.4, which in percentage points is quite high and suboptimal. 
+
+#### Prediction 
+
+In order to analyse the different performances of the models, we are going to create a data frame in which we would be _adding_ the original value in testing set and the predicted of each model. Even if linear model is not the best performer, we are going to include its predictions to establish a benchmark model towards we may compare the rest. 
+
+```{r}
+test_results <- data.frame(trade_pcg = testingR$trade_pcg)
+test_results$lm <- predict(linear_model, testingR)
+postResample(pred = test_results$lm,  obs = test_results$trade_pcg)
+```
+
+### Step Wise
+
+In terms of interpretation models, we may resort to the stepwise model to discover which are the variables that would serve to explain variability in the output. In theoretical terms, stepwise would start by taking all the possible correlations of covariates that explain Y, and at the same time it will start with the pair of covariates with the highest correlation. At each iteration, the algorithm will remove one variable from the first group, and add another one to the second one. This have to objective to optimize the number of variables, and retaining the minimum covariates with significance that explain the most possible variability of Y. In the end, we would try to reduce the variance by finding the most relevant variables, and thus introducing also some bias into the model. To maximize performance, it also includes cross validation. 
+
+#### The model 
+
+```{r}
+step_model <- train(linear_cv, data = trainingR, 
+                   method = "leapSeq", 
+                   preProc=c('scale', 'center'),
+                   tuneGrid = expand.grid(nvmax = 4:10),
+                   trControl = ctrl_R)
+
+coef(step_model$finalModel, step_model$bestTune$nvmax)
+```
+The results of the algorithm demonstrate that the most optimal linear model account for 8 covariates, showed above. Once the model is constructed, the interpretation of the coefficient is the same as the linear model. On the one hand, variables such as belonging to East Asian Region, executive bribery and the educational opportunities have positive relationships with the output variable. Nonetheless, it is mentionable that area and GDP have negative relationship, meaning that the smaller the country and the bigger the GDP, the less % of trade on GDP a country has. 
+
+#### Prediction 
+
+As we did with linear regression, we are adding the prediction metrics to the dataframe with the original for future comparisons. However, even if this model is the most efficient, we have not been able to improve the performance; the R-squared is 35% (lower than linear model) and the MAE stands at 28.6. 
+
+```{r}
+test_results$step <- predict(step_model, testingR)
+postResample(pred = test_results$step,  obs = test_results$trade_pcg)
+```
+
+### Lasso 
+
+The final interpretative tool that we will use to explain the variability in the output is the Lasso Regression. It is a regularized linear model. The idea would be to minimize the error formula that is used to find the best model (L2 regularization) by adding a parameter. The error term equation would be calculated with different lamba hyperparameters in order to find the most optimal combination that even if adding some bias, the variance is reduced, so the performances would be better. 
+
+#### Model and Control 
+
+For training the lasso model, we are selecting the most relevant variables as determined by the stepwise model. Also, we will define the number of hyperparameters to optimize the error formula in 100 and 5-k cross validation.
+
+```{r}
+ModelL <- trade_pcg ~ opp_parties + exc_bribery + opp_oversight + jud_independence + women_prevented +  educational_opp + region + population + area
+
+lasso_grid <- expand.grid(fraction = seq(.01, 1, length = 100))
+
+```
+
+#### The model 
+
+```{r}
+lasso_model <- train(ModelL, data = trainingR,
+                    method='lasso',
+                    preProc=c('scale','center'),
+                    tuneGrid = lasso_grid,
+                    trControl=ctrl_R)
+plot(lasso_model)
+lasso_model$bestTune
+```
+The results for the lasso regularization show that the lamba hyperparameter that optimizes the error formula is the 99th of all the ones tested. As the plot shows, the root mean square error is minimized with each new hyperparameter tested. While at the beginning the values of the errors are above 46 (percentage terms in Y), it quickly reduces, so from the 50th hyperparameters it is already optimized to ~40% in RMSE.   
+
+#### Prediction
+
+```{r}
+test_results$lasso<- predict(lasso_model, testingR) 
+postResample(pred = test_results$lasso,  obs = test_results$trade_pcg)
+```
+Withal, the variability of Y is not explained more than 38% with the lasso regression, as the R-square shows. This ultimately implies that with linear regression models and all their variants, there is a maximum variability of the output that we can explain with democratic variables. Even optimizing the error formula and selecting only the most relevant variables, there is a _ceiling_ that we can not surpass around 40%. Ultimately, from a social sciences perspectives, it is reasonable to think that there may be many other factors that would serve to explain the bulk of trade in a country. 
+
+## Advance regression: prediction tools 
+
+Even if the amount of variability we can explain is limited, we may still be able to predict with great amount of accuracy the exact level of trade using other machine learning tools. Taking advantage of the trade-off between bias and variance, the machine learning tools used before would serve us again to predict this number. Then, even if interpretability is reduced due to the huge amount of noise that we would include, there would be some conclusions that we could draw. 
+
+### The model 
+
+The first task we may do is to redefine the model by adding once again all the original variables. 
+
+```{r}
+ModelP <- trade_pcg ~.
+```
+
+### Elastic Net 
+
+Elastic net model is the combination of Ridge Regression (not used before) and Lasso. It is a regularized linear model that add hyperparameters into the error formula (as lasso) and in the cross validation process (as Ridge regression). The theoretical idea of Elastic Net models is to obtain gather the best features of both types of model: The combination of the optimization of each of the terms would improve the predictive power of the model. 
+
+#### Model 
+
+Thus, we would need to define a new grid for this specific model, considering the two hyperparameters. 
+
+```{r}
+elastic_grid = expand.grid(alpha = seq(0, .2, 0.01), lambda = seq(0, .1, 0.01)) 
+
+elastic_model <- train(ModelL, data = trainingR,
+                     method='glmnet', 
+                     preProc=c('scale','center'),
+                     tuneGrid = elastic_grid,
+                     trControl=ctrl_R)
+
+plot(elastic_model)
+elastic_model$bestTune
+```
+For this specific case, the most optimal combination of parameters is the 40th iteration, in which the alpha hyperparameter (included in cross validation) is 0.03 and the lambda one is 0.06 (included in the error formula). As the plot shows, the root mean square error is minimized between 0.00 and 0.05. then, the different combinations of hyperparameters is not as efficient. However, we should take into consideration that the marginal improve in the error measurement is not high (from 38.58 to 38.5). Thus, we should not expect a much better performance than the previous ones. 
+
+#### Predictions
+
+```{r}
+test_results$elastic <- predict(elastic_model, testingR)
+postResample(pred = test_results$elastic,  obs = test_results$trade_pcg)
+```
+The performance metrics shows that even with the optimization of all possible terms is not enough. We reach the same trees hold as before.
+
+### KNN
+
+The next tool that we will use for predicting the exact bulk of trade in a country is K-Nearest Neighbourhoods. The idea is the similar as before: we will look into the most closest observations to predict the exact value of trade. However, during the cross validation process, it will use a different number of close neighbours each time (11, 13, 15, 19, 21), using a particular way to measure the distances; Minkowski. 
+
+#### The model 
+```{r}
+knn_regression <- train(ModelP, 
+                  data = trainingR,
+                  method = "kknn",   
+                  preProc=c('scale','center'),
+                  tuneGrid = data.frame(kmax=c(11,13,15,19,21),distance=2,kernel='optimal'),
+                  trControl = ctrl_R)
+plot(knn_regression)
+```
+
+Once again, this algorithm proves once again a great amount of accuracy. The root mean square errors is reduced to 11!. It constitutes a substantial reduction from the other statistical learning models. The plot also shows that the number of neighbours does not affect the errors accumulated in the predictions. 
+
+#### Prediction 
+
+```{r}
+test_results$knn <- predict(knn_regression, testingR)
+
+postResample(pred = test_results$knn,  obs = test_results$trade_pcg)
+```
+The mean average error is also reduced to 6.15% when predicting the output. The main reason why this method could be so precise is the nature and structure of the data itself. As it includes geographical and timely data, the KNN algorithm can gather very similar observations to calculate the output. Either by choosing 'past' observations or actual neighbours, it is able to forecast very well the amount of trade in a given country for a specific year. 
+
+### Random Forest 
+
+The 'last' model we are going to use to predict is Random Forest. It follows the same logic as before. However, this time, we will specify the number of random predictors selected at each iteration (8, 12, 15, 20). 
+
+#### The model 
+
+```{r}
+rf_regression <- train(ModelP, 
+                 data = trainingR,
+                 method = "rf",
+                 preProc=c('scale','center'),
+                 trControl = ctrl_R,
+                 ntree = 100,
+                 tuneGrid = data.frame(mtry=c(8,12,15,20)), 
+                 importance = TRUE)
+
+plot(rf_regression)
+```
+
+Contrary to classification, the most optimal numbers of predictors is 12 and 15. The u-shaped _distribution_ of selected predictor shows that selecting only a few of them or most of them is less efficient than choosing a number between 10 and 16. 
+
+#### Predictions 
+
+```{r}
+test_results$rf <- predict(rf_regression, testingR)
+postResample(pred = test_results$rf,  obs = test_results$trade_pcg)
+```
+Random forest seem to be a similar predictor as the KNN as the mean average error stand also around 6%. 
+
+### Variable importances 
+
+```{r}
+plot(varImp(knn_regression, scale = F), scales = list(y = list(cex = .95))) 
+plot(varImp(rf_regression, scale = F), scales = list(y = list(cex = .95))) 
+```
+On the one hand, the most important variables for KNN are population, executive bribery and territory controlled. On the other hand, Random Forest uses population, GDP, area and Region as the most important. In other words, while KNN focuses more on democratic features properly speaking, Random Forest is more interested into the geographical-economic ones. This distinction makes implicit the different methods and rules than each algorithm use to predict the output. 
+
+### Comparing predictions 
+
+In order to actually compare performance metrics, we may construct confidence interval for the predictions and calculate by hand the mean average error with the data frame that accounted with all the predictions. 
+
+```{r}
+apply(test_results[-1], 2, function(x) mean(abs(x - test_results$trade_pcg)))
+
+```
+Thus, using the apply function we can calculate _by hand_ the mean average error of each model to see which are the more efficient. As it was already stated, both KNN and RF are the better performances. This information is important as we are to weight both of them to calculate confidence intervals for the predictions. In other words, we would be creating artificially the range of values in which the a predicted observation could be situated. To do that, we first need to obtain the mean of both mean errors and compare the average of predictions to the actual values to observe which would be the performance: 
+
+
+
+```{r}
+test_results$comb <- (test_results$rf + test_results$knn)/2 
+postResample(pred <- test_results$comb,  obs = test_results$trade_pcg)
+
+```
+The figures show that when combining both methods, the predictions are indeed more precise.
+
+```{r}
+yhat <- test_results$comb
+head(yhat) 
+hist(yhat, col="lightblue", breaks = seq)
+```
+In the plot above we can see that the distribution of the predicted value is very similar to the original variable, which is another sign of the good performance of the combination of the two models weighted
+
+
+```{r}
+y <- test_results$trade_pcg
+error <- y-yhat
+hist(error, col="lightblue")
+```
+
+Even the errors seems to follow a normal distribution, with the average around 0, as the plot above demonstrates. 
+
+Next step would consist in creating the actual ranges of values for the confidence intervals, setting the noise and the confidence levels at 95%
+
+```{r}
+noise <- error[1:300]
+
+lwr <- yhat[301:length(yhat)] + quantile(noise,0.05, na.rm=T)
+upr <- yhat[301:length(yhat)] + quantile(noise,0.95, na.rm=T)
+
+predictions <- data.frame(real=y[301:length(y)], fit=yhat[301:length(yhat)], lwr=lwr, upr=upr)
+
+predictions <- predictions %>% mutate(out=factor(if_else(real<lwr | real>upr,1,0)))
+```
+
+Then, once the limits are set, we may visualize the results: 
+
+```{r}
+ggplot(predictions, aes(x=fit, y=real))+
+  geom_point(aes(color=out)) + theme(legend.position="none") +
+  geom_ribbon(data=predictions,aes(ymin=lwr,ymax=upr),alpha=0.3) +
+  labs(title = "Interval for the prediction", x = "Predicted trade importance",y="Trade as % of GDP")
+
+```
+The grey part correspond to the actual range of values in which we can assume the model predicted correctly. Red dots are the ones that fall under these range and blue ones are dots the models predicted wrongly. Up to 200% of trade relative to GDP, the model predict very good, as the number of blue dots is assumable as error. However, from this point onwards, the models are not able to predict correctly. At this specific case, we may assume that these observations are too special and outliers that even with sophisticated algorithms is not possible to predict them. Under these circumstances, we may focus only in the first range: 
+
+```{r}
+ggplot(predictions, aes(x=fit, y=real))+
+  geom_point(aes(color=out)) + theme(legend.position="none") +
+  xlim(0, 200) + ylim(30, 200)+
+  geom_ribbon(data=predictions,aes(ymin=lwr,ymax=upr),alpha=0.3)+
+  labs(title = "Interval for the prediction", x = "Predicted trade importance",y="Trade as % of GDP")
+
+```
+
+A closer look into these set of points help to visualize that even those wrongly predicted are very close to the range of the confidence interval. Apart from that, we may conclude that those countries that are below the range of values could be trading below an optimal range, according to democratic features. In other words, foreign investors or trade organzations could go into these countries to promote a bit more their international business; according to their democratic features, there would be room for increasing the bulk of trade, respective to the GDP. 
+
+On the contrary, there are other countries that seem to depend too much on international exchanges, those above the confidence interval. These countries would be possessing much more trade than expected. In this scenario, they should cautions as it could be relying excessively on foreign interchanges, in respect to the democratic variables. 
+
+## Other models and conclusion
+
+Apart from KNN and Random forest, we could have used other kind of tools to develop the report. More specifically, Neural Networks and Gradient Boosting models could have been used. The logic of the first is to run various set of logistic regressions in successive iterations (layers in machine learning methodology) to continuously optimize the coefficients (nodes in machine learning methodology) until the performance and predictions of the model are maximized. The number of layers (hyperparameters) could be as well optimized as well with cross validation. Similarly, Gradient Boosting involves the optimization of each new iteration of decision tree is included in the random forest using hyperparameters and the error terms. 
+
+However, both cases would have spent too many computational resources without adding much more accuracy to the model. Therefore it was decided that the most efficient way to predict both _low traders_ and the importance of trade in a country was to include only KNN and Random Forest. While losing too much interpretability, these two models served to predict correctly up to 95-96% of the _low traders_ and forecast with a very small margin the percentage of trade. Nonetheless, as it has already been stated, the timely nature of the data may have paved the way for such precision in the prediction. Thus, the extend by which democratic features of a country serve to predict the level of trade may not be as high. Further studies using alternatives ways may be useful to finally assess this relationship. 
+
+In any case, we may contemplate that the democratic features seem to be able to predict the closeness of a country. With respect to _low traders_ we were able to predict up to 90% of them using our covariates. Similarly, the margin of error for the exact account was very small when using predictive tools. On the contrary, the interpretability tools showed that the variability of Y was not as easy explained by democratic features. Only 40% in both cases. 
+
+## Annex: Code for Neural Network
+
+As stated in the conclusions, Neural Network took several minutes for training without improving the actual predictions. Nonetheless, the code used to test it can be found below: 
+
+--- 
+
+neural <- df_numeric %>% dplyr::select(-region, -precrisis) # factors not allowed
+modelN <- trade_pcg~. 
+
+in_trainN <- createDataPartition(neural$trade_pcg, p = 0.75, list = FALSE)
+trainingN <- df_numeric[ in_trainN,]
+testingN <- df_numeric[-in_trainN,]
+
+
+neural_model <- train(modelN, 
+                      data = trainingN,
+                      method = "neuralnet",
+                      preProc=c('scale','center'),
+                      trControl = ctrl_R,
+                      tuneGrid = expand.grid(layer1 = c(4, 2),
+                                             layer2 = c(2, 1, 0), 
+                                             layer3 = c(0)))
+
+test_results$nn <- predict(neural_model, testingN)
+postResample(pred = test_results&nn,  obs = test_results&trade_pcg)
+
+---
+
+## Bibliography 
+
+- @Misc{,
+  title = {{V-Dem Country-Year/Country-Date Dataset v11}},
+  author = {Michael Coppedge and John Gerring and Carl Henrik Knutsen and Staffan I. Lindberg and Jan Teorell and Nazifa Alizada and David Altman and Michael Bernhard and Agnes Cornell and M. Steven Fish and Lisa Gastaldi and Haakon Gjerl\o{}w and Adam Glynn and Allen Hicken and Garry Hindle and Nina Ilchenko and Joshua Krusell and Anna L\:uhrmann and Seraphine F. Maerz and Kyle L. Marquardt and Kelly McMann and Valeriya Mechkova and Juraj Medzihorsky and Pamela Paxton and Daniel Pemstein and Joseﬁne Pernes and Johannes {von Römer} and Brigitte Seim and Rachel Sigman and Svend-Erik Skaaning and Jeffrey Staton and Aksel Sundström and Ei-tan Tzelgov and Yi-ting Wang and Tore Wig and Steven Wilson and Daniel Ziblatt.},
+  institution = {Varieties of Democracy (V-Dem) Project},
+  year = {2021},
+  url = {https://www.v-dem.net/en/data/data-version-11/},
+}
+
+- @Misc{,
+  title = {{V-Dem Codebook v11}},
+  author = {Michael Coppedge and John Gerring and Carl Henrik Knutsen and Staffan I. Lindberg and Jan Teorell and David Altman and Michael Bernhard and Agnes Cornell and M. Steven Fish and Lisa Gastaldi and Haakon Gjerløw and Adam Glynn and Allen Hicken and Anna Lührmann and Seraphine F. Maerz and Kyle L. Marquardt and Kelly McMann and Valeriya Mechkova and Pamela Paxton and Daniel Pemstein and Johannes {von Römer} and Brigitte Seim and Rachel Sigman and Svend-Erik Skaaning and Jeffrey Staton and Aksel Sundtröm and Eitan Tzelgov and Luca Uberti and Yi-ting Wang and Tore Wig and Daniel Ziblatt},
+  institution = {Varieties of Democracy (V-Dem) Project},
+  year = {2021},
+  url = {https://www.v-dem.net/en/data/data-version-11/},
+}
+
+- @Misc{,
+  title = {{World Bank Open Data}},
+  author = {World Bank},
+  institution = {World Bank},
+  year = {2023},
+  url = {https://data.worldbank.org/indicator/NE.TRD.GNFS.ZS},
+}
+
+- @Misc {nogales20202
+title = {Advance Modelling | Computer Lab 4: Classification: understanding factors that explain student failure}, 
+author = {Nogales, F. Javier}, 
+year = {2023}}
+
+- @Misc {nogales20202
+title = {Advance Modelling | Computer Lab 5: Classification: understanding factors that explain student failure}, 
+author = {Nogales, F. Javier}, 
+year = {2023}}
+
+- @Misc {nogales20202
+title = {Advance Modelling | Computer Lab 6: Regression: Home Price Prediction}, 
+author = {Nogales, F. Javier}, 
+year = {2023}}
+
+- @Misc {
+title = {Session 3 - exercises }, 
+author = {Medina, Maria}, 
+year = {202}}
